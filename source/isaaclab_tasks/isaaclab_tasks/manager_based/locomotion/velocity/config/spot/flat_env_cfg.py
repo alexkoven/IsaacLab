@@ -58,13 +58,16 @@ class SpotCommandsCfg:
 
     base_velocity = mdp.UniformVelocityCommandCfg(
         asset_name="robot",
-        resampling_time_range=(10.0, 10.0),
-        rel_standing_envs=0.1,
+        resampling_time_range=(3.0, 3.0),
+        rel_standing_envs=0.8,
         rel_heading_envs=0.0,
         heading_command=False,
         debug_vis=True,
         ranges=mdp.UniformVelocityCommandCfg.Ranges(
-            lin_vel_x=(-2.0, 3.0), lin_vel_y=(-1.5, 1.5), ang_vel_z=(-2.0, 2.0)
+            # Stage-A (hind-legs-only learning): keep commands near zero.
+            lin_vel_x=(-0.15, 0.15),
+            lin_vel_y=(-0.10, 0.10),
+            ang_vel_z=(-0.15, 0.15),
         ),
     )
 
@@ -178,7 +181,8 @@ class SpotEventCfg:
         interval_range_s=(10.0, 15.0),
         params={
             "asset_cfg": SceneEntityCfg("robot"),
-            "velocity_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5)},
+            # Stage-A: disable pushes.
+            "velocity_range": {"x": (0.0, 0.0), "y": (0.0, 0.0)},
         },
     )
 
@@ -218,7 +222,7 @@ class SpotRewardsCfg:
     )
     gait = RewardTermCfg(
         func=spot_mdp.GaitReward,
-        weight=10.0,
+        weight=0.0,
         params={
             "std": 0.1,
             "max_err": 0.2,
@@ -241,6 +245,14 @@ class SpotRewardsCfg:
     )
     base_orientation = RewardTermCfg(
         func=spot_mdp.base_orientation_penalty, weight=-3.0, params={"asset_cfg": SceneEntityCfg("robot")}
+    )
+    front_feet_contact = RewardTermCfg(
+        func=spot_mdp.front_feet_contact_penalty,
+        weight=-5.0,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["fl_foot", "fr_foot"]),
+            "threshold": 1.0,
+        },
     )
     foot_slip = RewardTermCfg(
         func=spot_mdp.foot_slip_penalty,

@@ -234,6 +234,46 @@ def base_orientation_penalty(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) 
     return torch.linalg.norm((asset.data.projected_gravity_b[:, :2]), dim=1)
 
 
+def front_feet_contact_penalty(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, threshold: float) -> torch.Tensor:
+    """Penalize front-feet ground contact.
+
+    This term is intended as a simple shaping signal for learning hind-legs-only behaviors.
+    It counts how many selected feet have contact forces above a threshold.
+
+    Args:
+        env: The RL environment instance.
+        sensor_cfg: The contact sensor entity configuration. Its ``body_ids`` should refer to the *front feet*.
+        threshold: Contact-force magnitude threshold to classify contact.
+
+    Returns:
+        Per-environment penalty. Shape is (num_envs,).
+    """
+    contact_sensor = env.scene.sensors[sensor_cfg.name]
+    if not isinstance(contact_sensor, ContactSensor):
+        raise TypeError(
+            f"Sensor '{sensor_cfg.name}' is of type '{type(contact_sensor)}' but this term requires ContactSensor."
+        )
+    body_ids = sensor_cfg.body_ids
+    if body_ids is None:
+        raise ValueError(
+            "SceneEntityCfg.body_ids is None. Provide front-feet selection via sensor_cfg.body_names/body_ids."
+        )
+
+    # net_forces_w_history: (num_envs, history, num_bodies, 3)
+    net_contact_forces = contact_sensor.data.net_forces_w_history
+    if net_contact_forces is None:
+        raise RuntimeError("ContactSensor.net_forces_w_history is None. Increase history length or enable force tracking.")
+    # forces_mag: (num_envs, history, num_front_feet)
+    forces_mag = torch.norm(net_contact_forces[:, :, body_ids], dim=-1)
+    # max_mag: (num_envs, num_front_feet)
+    max_mag = torch.max(forces_mag, dim=1)[0]
+    # is_contact: (num_envs, num_front_feet)
+    is_contact = max_mag > threshold
+    # contact_count: (num_envs,)
+    contact_count = torch.sum(is_contact.to(dtype=torch.float32), dim=1)
+    return contact_count
+
+
 def foot_slip_penalty(
     env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, sensor_cfg: SceneEntityCfg, threshold: float
 ) -> torch.Tensor:
