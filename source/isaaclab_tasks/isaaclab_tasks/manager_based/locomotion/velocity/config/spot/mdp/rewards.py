@@ -225,13 +225,126 @@ def base_motion_penalty(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> to
 
 
 def base_orientation_penalty(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    """Penalize non-flat base orientation
+    """Penalize non-flat base orientation (roll-only).
 
-    This is computed by penalizing the xy-components of the projected gravity vector.
+    This is computed by penalizing only the *roll* component from the projected gravity vector.
+
+    Notes:
+        - ``asset.data.projected_gravity_b`` is gravity direction expressed in the base frame, ordered as ``[x, y, z]``.
+        - With the IsaacLab base-frame convention (x forward, y left, z up), roll shows up primarily in the ``y``
+          component.
     """
     # extract the used quantities (to enable type-hinting)
     asset: RigidObject = env.scene[asset_cfg.name]
-    return torch.linalg.norm((asset.data.projected_gravity_b[:, :2]), dim=1)
+    # projected_gravity_b: (num_envs, 3)
+    projected_gravity_b = asset.data.projected_gravity_b
+    g_y = projected_gravity_b[:, 1]  # (num_envs,)
+    return torch.abs(g_y)
+
+
+def base_pitch_upright_reward(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    ramp_up_to_deg: float,
+    plateau_start_deg: float,
+    ramp_down_to_deg: float,
+    over_tilt_penalty_slope: float = 1.0,
+) -> torch.Tensor:
+    """Reward pitching the base upright while discouraging under-/over-tilt.
+
+    This term provides a *pitch-only* shaping signal for hind-legs-only behaviors (rearing / biped-like
+    standing). It is intentionally agnostic to roll (use a separate roll penalty for lateral stability).
+
+    The pitch shaping is piecewise:
+
+    - **Pitch < 0°**: negative reward (penalty), linear with pitch.
+    - **0° → ramp_up_to_deg**: reward ramps linearly from 0 to 1.
+    - **plateau_start_deg → ramp_down_to_deg**: reward ramps down linearly from 1 to 0.
+    - **Pitch > ramp_down_to_deg**: negative reward (penalty) that grows linearly with over-tilt.
+
+    If ``plateau_start_deg > ramp_up_to_deg``, the range ``[ramp_up_to_deg, plateau_start_deg]`` is a
+    constant-reward plateau at 1.0 (your desired 50°–80° region).
+
+    Notes:
+        - We infer pitch from the projected gravity vector expressed in the base frame.
+        - With base-frame convention (x forward, y left, z up), for pure pitch about +y:
+          gx = sin(theta), gz = -cos(theta), and thus theta = atan2(gx, -gz).
+
+    Args:
+        env: The RL environment instance.
+        asset_cfg: The robot rigid-body configuration.
+        ramp_up_to_deg: Pitch (deg) at which the reward reaches 1.0 during the ramp-up from 0°.
+        plateau_start_deg: Pitch (deg) where the reward plateau ends and the ramp-down begins.
+        ramp_down_to_deg: Pitch (deg) at which the reward reaches 0.0 again. Beyond this, over-tilt is penalized.
+        over_tilt_penalty_slope: Linear slope applied for over-tilt penalty beyond ``ramp_down_to_deg``.
+
+    Returns:
+        Per-environment reward. Shape is (num_envs,).
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+
+    # projected_gravity_b: (num_envs, 3)
+    projected_gravity_b = asset.data.projected_gravity_b
+    g_x = projected_gravity_b[:, 0]  # (num_envs,)
+    g_z = projected_gravity_b[:, 2]  # (num_envs,)
+
+    # pitch_rad: (num_envs,)
+    # For pure pitch about base-frame y: g_x = sin(pitch), g_z = -cos(pitch) => pitch = atan2(g_x, -g_z).
+    pitch_rad = torch.atan2(g_x, -g_z)
+
+    # Convert degree thresholds to radians on the correct device/dtype.
+    ramp_up_rad = pitch_rad.new_tensor(ramp_up_to_deg) * torch.pi / 180.0
+    plateau_start_rad = pitch_rad.new_tensor(plateau_start_deg) * torch.pi / 180.0
+    ramp_down_rad = pitch_rad.new_tensor(ramp_down_to_deg) * torch.pi / 180.0
+
+    # Sanity clamp ordering to avoid NaNs from negative denominators if misconfigured.
+    ramp_up_rad = torch.clamp(ramp_up_rad, min=1.0e-6)
+    plateau_start_rad = torch.max(plateau_start_rad, ramp_up_rad)
+    ramp_down_rad = torch.max(ramp_down_rad, plateau_start_rad + 1.0e-6)
+
+    # 0° → ramp_up: linear ramp (also gives negative values for pitch < 0°).
+    # r_up: (num_envs,)
+    r_up = torch.clamp(pitch_rad / ramp_up_rad, min=-1.0, max=1.0)
+
+    # plateau: (num_envs,) constant 1.0 for [ramp_up, plateau_start]
+    r = torch.where(pitch_rad >= ramp_up_rad, pitch_rad.new_ones(pitch_rad.shape), r_up)
+    r = torch.where(pitch_rad >= plateau_start_rad, pitch_rad.new_ones(pitch_rad.shape), r)
+
+    # ramp-down: plateau_start → ramp_down maps 1 → 0
+    # r_down: (num_envs,)
+    r_down = torch.clamp((ramp_down_rad - pitch_rad) / (ramp_down_rad - plateau_start_rad), min=0.0, max=1.0)
+    r = torch.where(pitch_rad >= plateau_start_rad, r_down, r)
+
+    # over-tilt penalty beyond ramp_down (e.g. > 90°): negative linear penalty.
+    # penalty: (num_envs,)
+    over_tilt = torch.relu(pitch_rad - ramp_down_rad)
+    over_tilt_pen = -over_tilt_penalty_slope * (over_tilt / (ramp_down_rad - plateau_start_rad))
+    r = torch.where(pitch_rad > ramp_down_rad, over_tilt_pen, r)
+
+    return r
+
+
+# Backwards-compatible alias (was used briefly during experimentation).
+def base_orientation_pitch_relaxed_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    pitch_relax_up_to_deg: float,
+    pitch_relax_down_to_deg: float = 0.0,
+) -> torch.Tensor:
+    """Alias for older experimental term name.
+
+    This previously meant "roll penalty + pitch relaxation". It is kept only to avoid breaking configs if referenced.
+    """
+    # Map to the new shaping reward with a simple default schedule around the provided "relax up to" value.
+    # % TO-DO: Remove this alias once configs are migrated.
+    return base_pitch_upright_reward(
+        env=env,
+        asset_cfg=asset_cfg,
+        ramp_up_to_deg=50.0,
+        plateau_start_deg=min(80.0, pitch_relax_up_to_deg),
+        ramp_down_to_deg=90.0,
+        over_tilt_penalty_slope=1.0,
+    )
 
 
 def front_feet_contact_penalty(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, threshold: float) -> torch.Tensor:

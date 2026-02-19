@@ -244,7 +244,20 @@ class SpotRewardsCfg:
         func=spot_mdp.base_motion_penalty, weight=-2.0, params={"asset_cfg": SceneEntityCfg("robot")}
     )
     base_orientation = RewardTermCfg(
-        func=spot_mdp.base_orientation_penalty, weight=-3.0, params={"asset_cfg": SceneEntityCfg("robot")}
+        func=spot_mdp.base_orientation_penalty,
+        weight=-3.0,
+        params={"asset_cfg": SceneEntityCfg("robot")},
+    )
+    base_pitch_upright = RewardTermCfg(
+        func=spot_mdp.base_pitch_upright_reward,
+        weight=5.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "ramp_up_to_deg": 50.0,
+            "plateau_start_deg": 80.0,
+            "ramp_down_to_deg": 90.0,
+            "over_tilt_penalty_slope": 1.0,
+        },
     )
     front_feet_contact = RewardTermCfg(
         func=spot_mdp.front_feet_contact_penalty,
