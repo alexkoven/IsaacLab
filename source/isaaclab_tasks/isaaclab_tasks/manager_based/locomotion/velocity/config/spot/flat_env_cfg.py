@@ -192,7 +192,7 @@ class SpotRewardsCfg:
     # -- task
     air_time = RewardTermCfg(
         func=spot_mdp.air_time_reward,
-        weight=0.0,
+        weight=5.0,
         params={
             "mode_time": 0.3,
             "velocity_threshold": 0.5,
@@ -237,7 +237,7 @@ class SpotRewardsCfg:
     action_smoothness = RewardTermCfg(func=spot_mdp.action_smoothness_penalty, weight=-1.0)
     air_time_variance = RewardTermCfg(
         func=spot_mdp.air_time_variance_penalty,
-        weight=-0.5,
+        weight=-1.0,
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot")},
     )
     base_motion = RewardTermCfg(
@@ -250,7 +250,7 @@ class SpotRewardsCfg:
     )
     base_pitch_upright = RewardTermCfg(
         func=spot_mdp.base_pitch_upright_reward,
-        weight=5.0,
+        weight=3.0,
         params={
             "asset_cfg": SceneEntityCfg("robot"),
             "ramp_up_to_deg": 50.0,
