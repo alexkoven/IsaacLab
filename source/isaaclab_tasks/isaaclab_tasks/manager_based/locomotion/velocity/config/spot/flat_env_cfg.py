@@ -192,7 +192,7 @@ class SpotRewardsCfg:
     # -- task
     air_time = RewardTermCfg(
         func=spot_mdp.air_time_reward,
-        weight=5.0,
+        weight=0.0,
         params={
             "mode_time": 0.3,
             "velocity_threshold": 0.5,
@@ -237,7 +237,7 @@ class SpotRewardsCfg:
     action_smoothness = RewardTermCfg(func=spot_mdp.action_smoothness_penalty, weight=-1.0)
     air_time_variance = RewardTermCfg(
         func=spot_mdp.air_time_variance_penalty,
-        weight=-1.0,
+        weight=-0.5,
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot")},
     )
     base_motion = RewardTermCfg(
@@ -366,6 +366,10 @@ class SpotFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
 
         # no height scan
         self.scene.height_scanner = None
+
+        # disable terrain-level curriculum so env origins stay fixed across training
+        # (avoids robots migrating to far terrain tiles and disappearing from the camera)
+        self.curriculum.terrain_levels = None
 
 
 class SpotFlatEnvCfg_PLAY(SpotFlatEnvCfg):
