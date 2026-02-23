@@ -49,8 +49,12 @@ def air_time_reward(
     t_max = torch.max(current_air_time, current_contact_time)
     t_min = torch.clip(t_max, max=mode_time)
     stance_cmd_reward = torch.clip(current_contact_time - current_air_time, -mode_time, mode_time)
-    cmd = torch.norm(env.command_manager.get_command("base_velocity"), dim=1).unsqueeze(dim=1).expand(-1, 4)
-    body_vel = torch.linalg.norm(asset.data.root_lin_vel_b[:, :2], dim=1).unsqueeze(dim=1).expand(-1, 4)
+    # Broadcast command magnitude and realized base speed to match selected feet count.
+    # current_air_time/current_contact_time: (num_envs, num_selected_feet)
+    cmd_mag = torch.norm(env.command_manager.get_command("base_velocity"), dim=1)  # (num_envs,)
+    body_vel_mag = torch.linalg.norm(asset.data.root_lin_vel_b[:, :2], dim=1)  # (num_envs,)
+    cmd = cmd_mag.unsqueeze(dim=1).expand_as(current_air_time)  # (num_envs, num_selected_feet)
+    body_vel = body_vel_mag.unsqueeze(dim=1).expand_as(current_air_time)  # (num_envs, num_selected_feet)
     reward = torch.where(
         torch.logical_or(cmd > 0.0, body_vel > velocity_threshold),
         torch.where(t_max < mode_time, t_min, 0),
