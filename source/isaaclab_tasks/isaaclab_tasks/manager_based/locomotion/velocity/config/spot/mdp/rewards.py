@@ -223,7 +223,7 @@ def base_motion_penalty(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> to
     """Penalize base vertical and roll/pitch velocity"""
     # extract the used quantities (to enable type-hinting)
     asset: RigidObject = env.scene[asset_cfg.name]
-    return 0.8 * torch.square(asset.data.root_lin_vel_b[:, 2]) + 0.2 * torch.sum(
+    return 0.0 * torch.square(asset.data.root_lin_vel_b[:, 2]) + 0.2 * torch.sum(
         torch.abs(asset.data.root_ang_vel_b[:, :2]), dim=1
     )
 
@@ -249,83 +249,141 @@ def base_orientation_penalty(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) 
 def base_pitch_upright_reward(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg,
-    ramp_up_to_deg: float,
-    plateau_start_deg: float,
-    ramp_down_to_deg: float,
-    over_tilt_penalty_slope: float = 1.0,
+    min_pitch_deg: float,
+    max_pitch_deg: float,
+    pitch_std_deg: float = 5.0,
+    min_height_m: float = 0.6,
+    max_height_m: float = 0.8,
+    height_std_m: float = 0.02,
 ) -> torch.Tensor:
-    """Reward pitching the base upright while discouraging under-/over-tilt.
+    """Smooth band-pass reward for being *upright* at the right *height*.
 
-    This term provides a *pitch-only* shaping signal for hind-legs-only behaviors (rearing / biped-like
-    standing). It is intentionally agnostic to roll (use a separate roll penalty for lateral stability).
+    This term is intentionally simple: it is the product of two smooth band-pass filters:
 
-    The pitch shaping is piecewise:
+    - **Pitch band-pass**: 1.0 when pitch is within ``[min_pitch_deg, max_pitch_deg]`` and decays smoothly outside.
+    - **Height band-pass**: 1.0 when base height (world z) is within ``[min_height_m, max_height_m]`` and decays
+      smoothly outside.
 
-    - **Pitch < 0°**: negative reward (penalty), linear with pitch.
-    - **0° → ramp_up_to_deg**: reward ramps linearly from 0 to 1.
-    - **plateau_start_deg → ramp_down_to_deg**: reward ramps down linearly from 1 to 0.
-    - **Pitch > ramp_down_to_deg**: negative reward (penalty) that grows linearly with over-tilt.
+    The final reward is:
 
-    If ``plateau_start_deg > ramp_up_to_deg``, the range ``[ramp_up_to_deg, plateau_start_deg]`` is a
-    constant-reward plateau at 1.0 (your desired 50°–80° region).
+    ``r = exp(-(d_theta/sigma_theta)^2) * exp(-(d_z/sigma_z)^2)``
+
+    where ``d_theta`` and ``d_z`` are the distances to the pitch/height bands
+    (0 inside the band, positive outside).
 
     Notes:
-        - We infer pitch from the projected gravity vector expressed in the base frame.
+        - Pitch is inferred from ``projected_gravity_b`` (gravity direction expressed in base frame).
         - With base-frame convention (x forward, y left, z up), for pure pitch about +y:
           gx = sin(theta), gz = -cos(theta), and thus theta = atan2(gx, -gz).
 
     Args:
         env: The RL environment instance.
         asset_cfg: The robot rigid-body configuration.
-        ramp_up_to_deg: Pitch (deg) at which the reward reaches 1.0 during the ramp-up from 0°.
-        plateau_start_deg: Pitch (deg) where the reward plateau ends and the ramp-down begins.
-        ramp_down_to_deg: Pitch (deg) at which the reward reaches 0.0 again. Beyond this, over-tilt is penalized.
-        over_tilt_penalty_slope: Linear slope applied for over-tilt penalty beyond ``ramp_down_to_deg``.
+        min_pitch_deg: Lower bound of desired upright pitch band [deg].
+        max_pitch_deg: Upper bound of desired upright pitch band [deg].
+        pitch_std_deg: Smoothness (decay length-scale) outside pitch band [deg].
+        min_height_m: Lower bound of desired base height band [m] using ``root_pos_w[:, 2]``.
+        max_height_m: Upper bound of desired base height band [m].
+        height_std_m: Smoothness (decay length-scale) outside height band [m].
 
     Returns:
-        Per-environment reward. Shape is (num_envs,).
+        Per-environment reward in (0, 1]. Shape is (num_envs,).
     """
     asset: RigidObject = env.scene[asset_cfg.name]
 
+    # -----------------------
+    # Pitch band-pass shaping
+    # -----------------------
     # projected_gravity_b: (num_envs, 3)
     projected_gravity_b = asset.data.projected_gravity_b
     g_x = projected_gravity_b[:, 0]  # (num_envs,)
     g_z = projected_gravity_b[:, 2]  # (num_envs,)
 
     # pitch_rad: (num_envs,)
-    # For pure pitch about base-frame y: g_x = sin(pitch), g_z = -cos(pitch) => pitch = atan2(g_x, -g_z).
     pitch_rad = torch.atan2(g_x, -g_z)
+    min_pitch_rad = pitch_rad.new_tensor(min_pitch_deg) * torch.pi / 180.0
+    max_pitch_rad = pitch_rad.new_tensor(max_pitch_deg) * torch.pi / 180.0
+    min_pitch_rad, max_pitch_rad = torch.min(min_pitch_rad, max_pitch_rad), torch.max(min_pitch_rad, max_pitch_rad)
 
-    # Convert degree thresholds to radians on the correct device/dtype.
-    ramp_up_rad = pitch_rad.new_tensor(ramp_up_to_deg) * torch.pi / 180.0
-    plateau_start_rad = pitch_rad.new_tensor(plateau_start_deg) * torch.pi / 180.0
-    ramp_down_rad = pitch_rad.new_tensor(ramp_down_to_deg) * torch.pi / 180.0
+    # Distance outside pitch band (0 inside): (num_envs,) [rad]
+    d_pitch_below = torch.relu(min_pitch_rad - pitch_rad)
+    d_pitch_above = torch.relu(pitch_rad - max_pitch_rad)
+    d_pitch_out = d_pitch_below + d_pitch_above
 
-    # Sanity clamp ordering to avoid NaNs from negative denominators if misconfigured.
-    ramp_up_rad = torch.clamp(ramp_up_rad, min=1.0e-6)
-    plateau_start_rad = torch.max(plateau_start_rad, ramp_up_rad)
-    ramp_down_rad = torch.max(ramp_down_rad, plateau_start_rad + 1.0e-6)
+    pitch_std_rad = torch.clamp(pitch_rad.new_tensor(pitch_std_deg) * torch.pi / 180.0, min=1.0e-6)
+    r_pitch = torch.exp(-torch.square(d_pitch_out / pitch_std_rad))  # (num_envs,)
 
-    # 0° → ramp_up: linear ramp (also gives negative values for pitch < 0°).
-    # r_up: (num_envs,)
-    r_up = torch.clamp(pitch_rad / ramp_up_rad, min=-1.0, max=1.0)
+    # ------------------------
+    # Height band-pass shaping
+    # ------------------------
+    # root_pos_w: (num_envs, 3) [m]
+    root_pos_w = asset.data.root_pos_w
+    z_w = root_pos_w[:, 2]  # (num_envs,) [m]
 
-    # plateau: (num_envs,) constant 1.0 for [ramp_up, plateau_start]
-    r = torch.where(pitch_rad >= ramp_up_rad, pitch_rad.new_ones(pitch_rad.shape), r_up)
-    r = torch.where(pitch_rad >= plateau_start_rad, pitch_rad.new_ones(pitch_rad.shape), r)
+    min_h = z_w.new_tensor(min_height_m)
+    max_h = z_w.new_tensor(max_height_m)
+    min_h, max_h = torch.min(min_h, max_h), torch.max(min_h, max_h)
 
-    # ramp-down: plateau_start → ramp_down maps 1 → 0
-    # r_down: (num_envs,)
-    r_down = torch.clamp((ramp_down_rad - pitch_rad) / (ramp_down_rad - plateau_start_rad), min=0.0, max=1.0)
-    r = torch.where(pitch_rad >= plateau_start_rad, r_down, r)
+    # Distance outside height band (0 inside): (num_envs,) [m]
+    d_h_below = torch.relu(min_h - z_w)
+    d_h_above = torch.relu(z_w - max_h)
+    d_h_out = d_h_below + d_h_above
 
-    # over-tilt penalty beyond ramp_down (e.g. > 90°): negative linear penalty.
-    # penalty: (num_envs,)
-    over_tilt = torch.relu(pitch_rad - ramp_down_rad)
-    over_tilt_pen = -over_tilt_penalty_slope * (over_tilt / (ramp_down_rad - plateau_start_rad))
-    r = torch.where(pitch_rad > ramp_down_rad, over_tilt_pen, r)
+    h_std = torch.clamp(z_w.new_tensor(height_std_m), min=1.0e-6)
+    r_height = torch.exp(-torch.square(d_h_out / h_std))  # (num_envs,)
 
-    return r
+    return r_pitch * r_height
+
+
+def base_height_in_range_reward(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    min_height_m: float,
+    max_height_m: float,
+    std_m: float = 0.02,
+) -> torch.Tensor:
+    """Reward keeping the robot base height within a desired band.
+
+    The base height is defined as the robot root/base position in world frame along +z:
+    ``z_w = asset.data.root_pos_w[:, 2]``.
+
+    The reward is a smooth band-pass:
+
+    - If ``z_w`` is inside ``[min_height_m, max_height_m]`` then reward is 1.0.
+    - If ``z_w`` is outside the band, reward decays as ``exp(-(d/std_m)^2)``, where ``d`` is the distance
+      to the closest bound.
+
+    This is useful as a separate shaping term (Option C) so that other orientation/velocity rewards remain
+    active regardless of height, while still biasing the policy toward the target standing range.
+
+    Args:
+        env: The RL environment instance.
+        asset_cfg: The robot rigid-body configuration.
+        min_height_m: Lower bound on base height, in meters.
+        max_height_m: Upper bound on base height, in meters.
+        std_m: Decay length-scale (meters) for being outside the band.
+
+    Returns:
+        Per-environment reward. Shape is (num_envs,).
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+
+    # root_pos_w: (num_envs, 3) [m]
+    root_pos_w = asset.data.root_pos_w
+    z_w = root_pos_w[:, 2]  # (num_envs,) [m]
+
+    # Put scalars on the correct device/dtype and enforce ordering.
+    min_h = z_w.new_tensor(min_height_m)
+    max_h = z_w.new_tensor(max_height_m)
+    min_h, max_h = torch.min(min_h, max_h), torch.max(min_h, max_h)
+
+    # Distance outside the band (0 inside, positive outside): (num_envs,) [m]
+    d_below = torch.relu(min_h - z_w)
+    d_above = torch.relu(z_w - max_h)
+    d_out = d_below + d_above
+
+    std = torch.clamp(z_w.new_tensor(std_m), min=1.0e-6)
+    return torch.exp(-torch.square(d_out / std))
 
 
 # Backwards-compatible alias (was used briefly during experimentation).
@@ -339,15 +397,18 @@ def base_orientation_pitch_relaxed_penalty(
 
     This previously meant "roll penalty + pitch relaxation". It is kept only to avoid breaking configs if referenced.
     """
-    # Map to the new shaping reward with a simple default schedule around the provided "relax up to" value.
+    # Map to the new band-pass reward using the provided relaxed pitch band.
+    # Keep height band effectively "always on" for backwards compatibility.
     # % TO-DO: Remove this alias once configs are migrated.
     return base_pitch_upright_reward(
         env=env,
         asset_cfg=asset_cfg,
-        ramp_up_to_deg=50.0,
-        plateau_start_deg=min(80.0, pitch_relax_up_to_deg),
-        ramp_down_to_deg=90.0,
-        over_tilt_penalty_slope=1.0,
+        min_pitch_deg=pitch_relax_down_to_deg,
+        max_pitch_deg=pitch_relax_up_to_deg,
+        pitch_std_deg=5.0,
+        min_height_m=-1.0e6,
+        max_height_m=1.0e6,
+        height_std_m=1.0,
     )
 
 

@@ -176,7 +176,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # reset environment
     obs = env.get_observations()
-    timestep = 0
+    sim_step = 0
+
+    # -----------------------------------------------------------------------------
+    # Live height inspection (prints stats every 1 simulated second).
+    #
+    # Spot base/root world position:
+    #   env.unwrapped.scene["robot"].data.root_pos_w: (num_envs, 3) [m]
+    # We track env 0 (your command uses --num_envs 1).
+    # -----------------------------------------------------------------------------
+    print_interval_s = 1.0
+    window_elapsed_s = 0.0
+    window_min_z_m = float("inf")
+    window_max_z_m = float("-inf")
+    window_sum_z_m = 0.0
+    window_count = 0
+
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
@@ -188,10 +203,33 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             obs, _, dones, _ = env.step(actions)
             # reset recurrent states for episodes that have terminated
             policy_nn.reset(dones)
+
+        # --- base height statistics in simulated time ---
+        # root_pos_w: (num_envs, 3) [m] in world frame
+        base_z_m = float(env.unwrapped.scene["robot"].data.root_pos_w[0, 2].cpu().item())
+        window_elapsed_s += float(dt)
+        window_min_z_m = min(window_min_z_m, base_z_m)
+        window_max_z_m = max(window_max_z_m, base_z_m)
+        window_sum_z_m += base_z_m
+        window_count += 1
+
+        if window_elapsed_s >= print_interval_s and window_count > 0:
+            sim_time_s = float(sim_step + 1) * float(dt)
+            window_mean_z_m = window_sum_z_m / float(window_count)
+            print(
+                f"[HEIGHT] t={sim_time_s:8.3f} s | "
+                f"z_min={window_min_z_m: .4f} m, z_max={window_max_z_m: .4f} m, z_mean={window_mean_z_m: .4f} m"
+            )
+            window_elapsed_s = 0.0
+            window_min_z_m = float("inf")
+            window_max_z_m = float("-inf")
+            window_sum_z_m = 0.0
+            window_count = 0
+
+        sim_step += 1
         if args_cli.video:
-            timestep += 1
             # Exit the play loop after recording one video
-            if timestep == args_cli.video_length:
+            if sim_step == args_cli.video_length:
                 break
 
         # time delay for real-time evaluation
