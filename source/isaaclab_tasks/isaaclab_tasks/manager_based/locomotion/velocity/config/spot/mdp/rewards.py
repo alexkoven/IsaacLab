@@ -335,6 +335,96 @@ def base_pitch_upright_reward(
     return r_pitch * r_height
 
 
+def pitch_over_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    max_pitch_deg: float = 90.0,
+    std_pitch_deg: float = 10.0,
+) -> torch.Tensor:
+    """Penalize pitching past a maximum allowed pitch angle.
+
+    This is intended as a **safety wall** when encouraging large positive pitch (e.g., hind-stand).
+    The penalty is **0** when pitch is below ``max_pitch_deg`` and increases smoothly beyond it.
+
+    We compute pitch from the projected gravity vector in the base frame (same convention as
+    :func:`base_pitch_upright_reward`):
+
+    - ``pitch_rad = atan2(g_x, -g_z)``
+
+    Args:
+        env: The RL environment instance.
+        asset_cfg: The robot rigid-body configuration.
+        max_pitch_deg: Maximum allowed pitch angle [deg]. Penalty activates above this.
+        std_pitch_deg: Smoothness scale [deg] that controls how quickly penalty rises beyond ``max_pitch_deg``.
+
+    Returns:
+        Per-environment penalty in ``[0, 1)``. Shape is (num_envs,).
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+
+    projected_gravity_b = asset.data.projected_gravity_b  # (num_envs, 3)
+    g_x = projected_gravity_b[:, 0]  # (num_envs,)
+    g_z = projected_gravity_b[:, 2]  # (num_envs,)
+
+    pitch_rad = torch.atan2(g_x, -g_z)  # (num_envs,) [rad]
+    pitch_deg = pitch_rad * 180.0 / torch.pi  # (num_envs,) [deg]
+
+    max_pitch = pitch_deg.new_tensor(max_pitch_deg)  # () [deg]
+    d_over = torch.relu(pitch_deg - max_pitch)  # (num_envs,) [deg]
+
+    std = torch.clamp(pitch_deg.new_tensor(std_pitch_deg), min=1.0e-6)  # () [deg]
+    # Smooth hinge: 0 inside the safe region, approaches 1 as violation grows.
+    return 1.0 - torch.exp(-torch.square(d_over / std))
+
+
+def upside_down_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    margin: float = 0.0,
+) -> torch.Tensor:
+    """Penalize being upside-down using a simple projected-gravity threshold.
+
+    With the IsaacLab base-frame convention (x forward, y left, z up),
+    ``asset.data.projected_gravity_b[:, 2]`` (call it ``g_z``) becomes **positive** once the robot
+    is past ~90 degrees of tilt such that gravity points "up" in the base frame.
+
+    Args:
+        env: The RL environment instance.
+        asset_cfg: The robot rigid-body configuration.
+        margin: Extra margin above 0.0 for triggering the penalty. For example, ``margin=0.1``
+            reduces sensitivity near the boundary.
+
+    Returns:
+        Per-environment penalty in ``{0, 1}``. Shape is (num_envs,).
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    g_z = asset.data.projected_gravity_b[:, 2]  # (num_envs,)
+    return (g_z > margin).to(dtype=torch.float32)
+
+
+def base_height_below_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    min_height_m: float = 0.4,
+) -> torch.Tensor:
+    """Penalize the base being below a minimum height (simple crash indicator).
+
+    This is intentionally a simple threshold on the world-frame base/root height:
+    ``z_w = asset.data.root_pos_w[:, 2]``.
+
+    Args:
+        env: The RL environment instance.
+        asset_cfg: The robot rigid-body configuration.
+        min_height_m: Minimum allowed base height [m].
+
+    Returns:
+        Per-environment penalty in ``{0, 1}``. Shape is (num_envs,).
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    z_w = asset.data.root_pos_w[:, 2]  # (num_envs,) [m]
+    return (z_w < min_height_m).to(dtype=torch.float32)
+
+
 def base_height_in_range_reward(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg,
@@ -384,32 +474,6 @@ def base_height_in_range_reward(
 
     std = torch.clamp(z_w.new_tensor(std_m), min=1.0e-6)
     return torch.exp(-torch.square(d_out / std))
-
-
-# Backwards-compatible alias (was used briefly during experimentation).
-def base_orientation_pitch_relaxed_penalty(
-    env: ManagerBasedRLEnv,
-    asset_cfg: SceneEntityCfg,
-    pitch_relax_up_to_deg: float,
-    pitch_relax_down_to_deg: float = 0.0,
-) -> torch.Tensor:
-    """Alias for older experimental term name.
-
-    This previously meant "roll penalty + pitch relaxation". It is kept only to avoid breaking configs if referenced.
-    """
-    # Map to the new band-pass reward using the provided relaxed pitch band.
-    # Keep height band effectively "always on" for backwards compatibility.
-    # % TO-DO: Remove this alias once configs are migrated.
-    return base_pitch_upright_reward(
-        env=env,
-        asset_cfg=asset_cfg,
-        min_pitch_deg=pitch_relax_down_to_deg,
-        max_pitch_deg=pitch_relax_up_to_deg,
-        pitch_std_deg=5.0,
-        min_height_m=-1.0e6,
-        max_height_m=1.0e6,
-        height_std_m=1.0,
-    )
 
 
 def front_feet_contact_penalty(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, threshold: float) -> torch.Tensor:

@@ -87,11 +87,11 @@ def _parse_args() -> argparse.Namespace:
     # Pitch band-pass params (defaults match Spot flat config)
     parser.add_argument("--min_pitch_deg", type=float, default=60.0)
     parser.add_argument("--max_pitch_deg", type=float, default=80.0)
-    parser.add_argument("--pitch_std_deg", type=float, default=10.0)
+    parser.add_argument("--pitch_std_deg", type=float, default=30.0)
     # Height band-pass params
-    parser.add_argument("--min_height_m", type=float, default=0.6)
+    parser.add_argument("--min_height_m", type=float, default=0.5)
     parser.add_argument("--max_height_m", type=float, default=0.8)
-    parser.add_argument("--height_std_m", type=float, default=0.05)
+    parser.add_argument("--height_std_m", type=float, default=0.24)
     # Plot ranges
     parser.add_argument("--pitch_min_deg", type=float, default=-30.0)
     parser.add_argument("--pitch_max_deg", type=float, default=110.0)

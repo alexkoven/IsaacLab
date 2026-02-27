@@ -17,7 +17,6 @@ from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 import isaaclab_tasks.manager_based.locomotion.velocity.config.spot.mdp as spot_mdp
-import isaaclab_tasks.manager_based.locomotion.velocity.config.spot.mdp.rewards as spot_rewards
 import isaaclab_tasks.manager_based.locomotion.velocity.mdp as mdp
 from isaaclab_tasks.manager_based.locomotion.velocity.velocity_env_cfg import LocomotionVelocityRoughEnvCfg
 
@@ -60,7 +59,7 @@ class SpotCommandsCfg:
     base_velocity = mdp.UniformVelocityCommandCfg(
         asset_name="robot",
         resampling_time_range=(5.0, 5.0),
-        rel_standing_envs=1.0,
+        rel_standing_envs=0.8,
         rel_heading_envs=0.0,
         heading_command=False,
         debug_vis=True,
@@ -193,7 +192,7 @@ class SpotRewardsCfg:
     # -- task
     air_time = RewardTermCfg(
         func=spot_mdp.air_time_reward,
-        weight=1.0,
+        weight=5.0,
         params={
             "mode_time": 0.3,
             "velocity_threshold": 0.5,
@@ -223,11 +222,11 @@ class SpotRewardsCfg:
     )
     foot_clearance_front_legs = RewardTermCfg(
         func=spot_mdp.foot_clearance_reward,
-        weight=0.0,
+        weight=0.5,
         params={
             "std": 0.05,
             "tanh_mult": 2.0,
-            "target_height": 1.0,
+            "target_height": 0.1,
             "asset_cfg": SceneEntityCfg("robot", body_names=["fl_foot","fr_foot"]),
         },
     )
@@ -252,7 +251,7 @@ class SpotRewardsCfg:
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=["hl_foot","hr_foot"])},
     )
     base_motion = RewardTermCfg(
-        func=spot_mdp.base_motion_penalty, weight=-1.0, params={"asset_cfg": SceneEntityCfg("robot")}
+        func=spot_mdp.base_motion_penalty, weight=-0.5, params={"asset_cfg": SceneEntityCfg("robot")}
     )
     base_orientation = RewardTermCfg(
         func=spot_mdp.base_orientation_penalty,
@@ -261,33 +260,47 @@ class SpotRewardsCfg:
     )
     base_pitch_upright = RewardTermCfg(
         func=spot_mdp.base_pitch_upright_reward,
-        weight=5.0,
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            # Smooth pitch band-pass (reward=1 inside band, decays smoothly outside).
-            "min_pitch_deg": 60.0,
-            "max_pitch_deg": 80.0,
-            "pitch_std_deg": 10.0,
-            # Smooth height band-pass using root_pos_w[:, 2] [m].
-            "min_height_m": 0.6,
-            "max_height_m": 0.8,
-            "height_std_m": 0.05,
-        },
-    )
-    base_height_in_range = RewardTermCfg(
-        func=spot_rewards.base_height_in_range_reward,
-        # Redundant with `base_pitch_upright` height band-pass above. Keep disabled for easy ablations.
         weight=0.0,
         params={
             "asset_cfg": SceneEntityCfg("robot"),
-            "min_height_m": 0.8,
-            "max_height_m": 1.0,
-            "std_m": 0.07,
+            # Smooth pitch band-pass (reward=1 inside band, decays smoothly outside).
+            "min_pitch_deg": 50.0,
+            "max_pitch_deg": 80.0,
+            "pitch_std_deg": 30.0,
+            # Smooth height band-pass using root_pos_w[:, 2] [m].
+            "min_height_m": 0.5,
+            "max_height_m": 0.8,
+            "height_std_m": 0.24,
+        },
+    )
+    pitch_over = RewardTermCfg(
+        func=spot_mdp.pitch_over_penalty,
+        weight=-1000.0, # high penalty to avoid pitching over
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "max_pitch_deg": 90.0,
+            "std_pitch_deg": 10.0,
+        },
+    )
+    upside_down = RewardTermCfg(
+        func=spot_mdp.upside_down_penalty,
+        weight=-1000.0, # high penalty to avoid being upside down
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "margin": 0.0,
+        },
+    )
+    base_height_below = RewardTermCfg(
+        func=spot_mdp.base_height_below_penalty,
+        weight=-100.0, # high penalty to avoid being too low
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "min_height_m": 0.4,
         },
     )
     front_feet_contact = RewardTermCfg(
         func=spot_mdp.front_feet_contact_penalty,
-        weight=0.0,
+        weight=-10.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["fl_foot", "fr_foot"]),
             "threshold": 1.0,
@@ -304,12 +317,12 @@ class SpotRewardsCfg:
     )
     joint_acc = RewardTermCfg(
         func=spot_mdp.joint_acceleration_penalty,
-        weight=-1.0e-4,
+        weight=-0.5e-4,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*_h[xy]")},
     )
     joint_pos = RewardTermCfg(
         func=spot_mdp.joint_position_penalty,
-        weight=0.0,
+        weight=-0.7,
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
             "stand_still_scale": 5.0,
@@ -323,7 +336,7 @@ class SpotRewardsCfg:
     )
     joint_vel = RewardTermCfg(
         func=spot_mdp.joint_velocity_penalty,
-        weight=-1.0e-2,
+        weight=-0.5e-2,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*_h[xy]")},
     )
 
